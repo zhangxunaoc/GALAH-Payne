@@ -1,0 +1,460 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# Renormalisation of Nordlander Grid spectra with GUESS"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "from __future__ import absolute_import, division, print_function # Python2 compatibility\n",
+    "import numpy as np\n",
+    "import matplotlib.pyplot as plt\n",
+    "\n",
+    "try:\n",
+    "    %matplotlib inline\n",
+    "    %config InlineBackend.figure_format='retina'\n",
+    "except:\n",
+    "    pass\n",
+    "\n",
+    "import numpy as np\n",
+    "from scipy.stats import sigmaclip\n",
+    "from astropy.io import fits\n",
+    "import collections\n",
+    "\n",
+    "from The_Payne import utils\n",
+    "from The_Payne import spectral_model\n",
+    "from The_Payne import fitting"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "First we read in Thomas' grid into a dictionary"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 2,
+   "metadata": {
+    "scrolled": true
+   },
+   "outputs": [],
+   "source": [
+    "a1 = fits.getdata('/home/zhangxu/anaconda3/lib/python3.7/site-packages/The_Payne/other_data/GALAH-spectra4.fits',ext=1)[0]\n",
+    "a2 = fits.getdata('/home/zhangxu/anaconda3/lib/python3.7/site-packages/The_Payne/other_data/GALAH-spectra4.fits',ext=2)\n",
+    "a3 = fits.getdata('/home/zhangxu/anaconda3/lib/python3.7/site-packages/The_Payne/other_data/GALAH-absfluxes4.fits',ext=2)\n",
+    "\n",
+    "broad = a1[6]\n",
+    "\n",
+    "model_grid=collections.OrderedDict(\n",
+    "            wavelength = a1[0],\n",
+    "            teff = a1[1][broad == 12],\n",
+    "            logg = a1[2][broad == 12],\n",
+    "            feh = a1[3][broad == 12],\n",
+    "            alpha_fe = a1[4][broad == 12],\n",
+    "            c_fe = a1[5][broad == 12],\n",
+    "            broad = a1[6][broad == 12],\n",
+    "            smod_norm = a2[broad == 12],\n",
+    "            smod_abs = a3[broad == 12]\n",
+    "    )"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Thomas also provided spectra for the Sun (Grevesse07) and Arcturus (Heiter/Jofre+rest solar scaled Grevesse07)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 21,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "# a1 = fits.getdata('../The_Payne/other_data/exact-spectra2.fits',ext=1)[0]\n",
+    "# a2 = fits.getdata('../The_Payne/other_data/exact-spectra2.fits',ext=2)\n",
+    "# #a3 = fits.getdata('../The_Payne/other_data/exact-spectra2.fits',ext=3)\n",
+    "\n",
+    "# model_grid=collections.OrderedDict(\n",
+    "#             wavelength = a1[0],\n",
+    "#             teff = a1[1],\n",
+    "#             logg = a1[2],\n",
+    "#             feh = a1[3],\n",
+    "#             vmic = a1[4],\n",
+    "#             alpha_fe = [0.00,0.21],\n",
+    "#             c_fe = [0.00,0.00],\n",
+    "#             smod_norm = a2,\n",
+    "#             smod_abs = a2\n",
+    "#      )"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The spectra only need to cover the GALAH wavelength range. So let's only use the pixels \"in_galah_range\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 22,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "#in_galah_range = (\n",
+    "#    ((model_grid['wavelength'] >= 4715.94) & (model_grid['wavelength'] <= 4896.00)) |\n",
+    "#    ((model_grid['wavelength'] >= 5650.06) & (model_grid['wavelength'] <= 5868.25)) |\n",
+    "#    ((model_grid['wavelength'] >= 6480.52) & (model_grid['wavelength'] <= 6733.92)) |\n",
+    "#    ((model_grid['wavelength'] >= 7693.50) & (model_grid['wavelength'] <= 7875.55))\n",
+    "#    )\n",
+    "#model_grid['wavelength'] = model_grid['wavelength'][in_galah_range]\n",
+    "#model_grid['smod_norm'] = (model_grid['smod_norm'])[:,in_galah_range]\n",
+    "#model_grid['smod_abs'] = (model_grid['smod_abs'])[:,in_galah_range]\n",
+    "model_grid['smod_norm_guess'] = np.zeros(np.shape(model_grid['smod_norm']))\n",
+    "model_grid['smod_abs_guess'] = np.zeros(np.shape(model_grid['smod_abs']))\n",
+    "\n",
+    "wavelength = model_grid['wavelength']\n",
+    "\n",
+    "ccd = dict()\n",
+    "for each_ccd in range(4):\n",
+    "    ccd[each_ccd] = (wavelength > 1000*(4+each_ccd)) & (wavelength < 1000*(5+each_ccd))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## GUESS Normalisation routine\n",
+    "This code is adjusted from the GUESS code that we have gotten from Janez (see email from 8th November 2019)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 23,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "hermes_ctm=np.loadtxt('/home/zhangxu/anaconda3/lib/python3.7/site-packages/The_Payne/other_data/hermes_continuum_160201.dat')\n",
+    "\n",
+    "fit_degree = dict()\n",
+    "fit_degree[0] = 3\n",
+    "fit_degree[1] = 3\n",
+    "fit_degree[2] = 4\n",
+    "fit_degree[3] = 4\n",
+    "\n",
+    "sigma_clip = dict()\n",
+    "sigma_clip[0] = 3\n",
+    "sigma_clip[1] = 3\n",
+    "sigma_clip[2] = 2.7\n",
+    "sigma_clip[3] = 2.4\n",
+    "\n",
+    "star_no = np.arange(len(model_grid['teff']))"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The \"fit\" function is the main part of the GUESS code that is important for us.\n",
+    "\n",
+    "I have adjusted the function:\n",
+    "- Introduced the keyword \"debug\" to be able to do some debugging\n",
+    "- Introduced an \"else\" statement if the sigma clipping failed (which however was never used)\n",
+    "- Changed > and < to >= and <= respectively to be able to handle very metal-poor stars (for which the normalisation failed before)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 24,
+   "metadata": {
+    "code_folding": [
+     0
+    ]
+   },
+   "outputs": [],
+   "source": [
+    "def fit(cont_x,cont_y,x,y,deg,sigma_clip,ccd=1,fit_type='poly',debug=False): #poly,spline \n",
+    "    dummy,low,upp=sigmaclip(cont_y,sigma_clip,sigma_clip)\n",
+    "    good_cont=np.where( (cont_y>low) & (cont_y<upp)) #sigma clip\n",
+    "    if (len(cont_y)-len(good_cont[0]))   < (0.05*len(cont_y)): #if the number of rejected continuum regions is smaller than 5% of total regions, then the clip is ok \n",
+    "        if debug==True:\n",
+    "            print('rejected regions: {:} ({:.2f}% of total number of regions)'.format(len(cont_y)-len(good_cont[0]),100*float(len(cont_y)-len(good_cont[0]))/len(cont_y)))\n",
+    "        pass\n",
+    "    else:\n",
+    "        if debug==True:\n",
+    "            print('sigma clipping failed')\n",
+    "        good_cont=np.arange(len(cont_y))\n",
+    "\n",
+    "    cont_y=np.array(cont_y)\n",
+    "    cont_x=np.array(cont_x)\n",
+    "    cont_y_good=cont_y[good_cont]\n",
+    "    cont_x_good=cont_x[good_cont]\n",
+    "\n",
+    "    if ccd==4:\n",
+    "        fake_region=y[int(len(y)*0.97):]\n",
+    "        dummy,low4,upp4=sigmaclip(fake_region,2,2)\n",
+    "        fake_region=fake_region[np.where( (fake_region>=low4) & (fake_region<=upp4))[0]]\n",
+    "        fake_cont_y=np.percentile(fake_region,97)\n",
+    "        fake_cont_x=x[-1]\n",
+    "        cont_x_good=np.append(cont_x_good,[fake_cont_x]*3)\n",
+    "        cont_y_good=np.append(cont_y_good,[fake_cont_y]*3)\n",
+    "\n",
+    "        fake_region=y[:int(len(y)*0.03)]  \n",
+    "        dummy,low4,upp4=sigmaclip(fake_region,2,2)\n",
+    "        fake_region=fake_region[np.where( (fake_region>=low4) & (fake_region<=upp4))[0]] \n",
+    "        fake_cont_y=np.percentile(fake_region,97)\n",
+    "        fake_cont_x=x[0]\n",
+    "        cont_x_good=np.append(cont_x_good,[fake_cont_x]*3)\n",
+    "        cont_y_good=np.append(cont_y_good,[fake_cont_y]*3)\n",
+    "\n",
+    "    if ccd==3:\n",
+    "        fake_region=y[int(len(y)*0.99):]\n",
+    "        #fake_region=y[-10:]\n",
+    "        dummy,low3,upp3=sigmaclip(fake_region,3,3)\n",
+    "        fake_region=fake_region[np.where( (fake_region>=low3) & (fake_region<=upp3))[0]] \n",
+    "        fake_cont_y=np.percentile(fake_region,90)\n",
+    "        fake_cont_x=x[-1]\n",
+    "        cont_x_good=np.append(cont_x_good,[fake_cont_x]*1)\n",
+    "        cont_y_good=np.append(cont_y_good,[fake_cont_y]*1)\n",
+    "\n",
+    "        fake_region=y[:int(len(y)*0.03)]  \n",
+    "        dummy,low3,upp3=sigmaclip(fake_region,2,2)\n",
+    "        fake_region=fake_region[np.where( (fake_region>=low3) & (fake_region<=upp3))[0]] \n",
+    "        fake_cont_y=np.percentile(fake_region,90)\n",
+    "        fake_cont_x=x[0]\n",
+    "        cont_x_good=np.append(cont_x_good,[fake_cont_x]*3)\n",
+    "        cont_y_good=np.append(cont_y_good,[fake_cont_y]*3)\n",
+    "\n",
+    "    if fit_type=='poly':\n",
+    "        try:\n",
+    "            fitt=np.polyfit(cont_x_good,cont_y_good,deg)\n",
+    "        except:\n",
+    "            print('fitting gone wrong')\n",
+    "            return(False)\n",
+    "        if np.isnan(fitt).any():\n",
+    "            print('fitting gone wrong!')\n",
+    "            return(False)\n",
+    "        fitt2=np.poly1d(fitt)\n",
+    "        return(y/fitt2(x),fitt2,cont_x_good,cont_y_good)\n",
+    "    if fit_type=='spline':\n",
+    "        try:\n",
+    "            fitt=UnivariateSpline(cont_x_good,cont_y_good,s=deg)\n",
+    "        except:\n",
+    "            print('fitting gone wrong')\n",
+    "            return(False)\n",
+    "        return(y/fitt(x),fitt,cont_x_good,cont_y_good)\n",
+    "    if fit_type=='cheb':\n",
+    "        try:\n",
+    "            fitt=np.polynomial.Chebyshev.fit(cont_x_good,cont_y_good,deg=deg)\n",
+    "        except:\n",
+    "            print('fitting gone wrong')\n",
+    "            return(False)\n",
+    "        return(y/fitt(x),fitt,cont_x_good,cont_y_good)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The following 2 functions basically only apply the fit function to achieve a normalisation for the normalised flux (\"smod_norm_guess\") and the absolute flux (\"smod_abs_guess\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 25,
+   "metadata": {
+    "code_folding": [
+     0
+    ],
+    "scrolled": false
+   },
+   "outputs": [],
+   "source": [
+    "def renormalise_norm(each_star_index,debug=False):\n",
+    "\n",
+    "    if debug==True:\n",
+    "        f, gs = plt.subplots(4,1,figsize=(15,10))\n",
+    "    \n",
+    "    for each_ccd in np.arange(4):\n",
+    "    \n",
+    "        raw_wave = wavelength[ccd[each_ccd]]\n",
+    "        raw_flux = model_grid['smod_norm'][each_star_index,ccd[each_ccd]]\n",
+    "\n",
+    "        if debug==True:\n",
+    "            ax = gs[each_ccd]\n",
+    "            ax.set_ylim(0.0,1.05)\n",
+    "            ax.plot(raw_wave,raw_flux,label='Input')\n",
+    "\n",
+    "        fit_y=[]\n",
+    "        fit_x=[]\n",
+    "        for ss in range(len(raw_wave)):\n",
+    "            for kk in hermes_ctm:\n",
+    "                if raw_wave[ss]< kk[1] and raw_wave[ss]> kk[0]:\n",
+    "                    fit_y.append(raw_flux[ss])\n",
+    "                    fit_x.append(raw_wave[ss])\n",
+    "                    \n",
+    "        flux_raw_norm,fit_func,fit_x_good,fit_y_good=fit(\n",
+    "            fit_x,fit_y,\n",
+    "            raw_wave,\n",
+    "            raw_flux,\n",
+    "            fit_degree[each_ccd],sigma_clip[each_ccd],ccd=each_ccd+1,fit_type='cheb',debug=False)\n",
+    "\n",
+    "        if debug==True:\n",
+    "            ax.plot(raw_wave,flux_raw_norm,label='Output')\n",
+    "\n",
+    "        model_grid['smod_norm_guess'][each_star_index,ccd[each_ccd]] = flux_raw_norm"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 26,
+   "metadata": {
+    "code_folding": [
+     0
+    ]
+   },
+   "outputs": [],
+   "source": [
+    "def renormalise_abs(each_star_index,debug=False):\n",
+    "\n",
+    "    if debug==True:\n",
+    "        f, gs = plt.subplots(4,1,figsize=(15,10))\n",
+    "    \n",
+    "    for each_ccd in np.arange(4):\n",
+    "    \n",
+    "        raw_wave = wavelength[ccd[each_ccd]]\n",
+    "        raw_flux = model_grid['smod_abs'][each_star_index,ccd[each_ccd]]\n",
+    "        raw_flux = raw_flux/np.median(raw_flux)\n",
+    "\n",
+    "        if debug==True:\n",
+    "            ax = gs[each_ccd]\n",
+    "            ax.set_ylim(0.0,1.05)\n",
+    "            ax.plot(raw_wave,raw_flux,label='Input')\n",
+    "\n",
+    "        fit_y=[]\n",
+    "        fit_x=[]\n",
+    "        for ss in range(len(raw_wave)):\n",
+    "            for kk in hermes_ctm:\n",
+    "                if raw_wave[ss]< kk[1] and raw_wave[ss]> kk[0]:\n",
+    "                    fit_y.append(raw_flux[ss])\n",
+    "                    fit_x.append(raw_wave[ss])\n",
+    "                    \n",
+    "        flux_raw_norm,fit_func,fit_x_good,fit_y_good=fit(\n",
+    "            fit_x,fit_y,\n",
+    "            raw_wave,\n",
+    "            raw_flux,\n",
+    "            fit_degree[each_ccd],sigma_clip[each_ccd],ccd=each_ccd+1,fit_type='cheb',debug=False)\n",
+    "\n",
+    "        if debug==True:\n",
+    "            ax.plot(raw_wave,flux_raw_norm,label='Output')\n",
+    "\n",
+    "        model_grid['smod_abs_guess'][each_star_index,ccd[each_ccd]] = flux_raw_norm"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "We then simply apply these 2 functions within a for loop over all of the grid spectra."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 27,
+   "metadata": {
+    "code_folding": [],
+    "scrolled": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "0\n"
+     ]
+    }
+   ],
+   "source": [
+    "for each_star_index in star_no: \n",
+    "    if each_star_index%1000==0:\n",
+    "        print(each_star_index)\n",
+    "    renormalise_norm(each_star_index,debug=False)\n",
+    "#    renormalise_abs(each_star_index,debug=False)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "The final result is a dictionary with all the important arrays, which we then save into an NPZ file"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 28,
+   "metadata": {},
+   "outputs": [],
+   "source": [
+    "np.savez('/home/zhangxu/anaconda3/lib/python3.7/site-packages/The_Payne/other_data/GALAH_NordlanderGrid_GUESSnorm_12.npz', **model_grid)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "And just to get an idea of how the normalisation changed, below we can chose an index from the grid and plot \"smod_norm\" as well as \"smod_norm_guess\""
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "code_folding": []
+   },
+   "outputs": [],
+   "source": [
+    "index = 0\n",
+    "\n",
+    "f, gs = plt.subplots(4,1,figsize=(15,10))\n",
+    "print(model_grid['teff'][index],model_grid['logg'][index],model_grid['feh'][index],model_grid['alpha_fe'][index])\n",
+    "for each_ccd in range(4):\n",
+    "    ax = gs[each_ccd]\n",
+    "    ax.set_ylim(0.0,1.05)\n",
+    "    ax.plot(wavelength[ccd[each_ccd]],model_grid['smod_norm'][index][ccd[each_ccd]],label='Input (before GUESS)',lw=1)\n",
+    "    ax.plot(wavelength[ccd[each_ccd]],model_grid['smod_norm_guess'][index][ccd[each_ccd]],label='Output (after GUESS)',lw=1)\n",
+    "    if each_ccd==0:\n",
+    "        ax.legend()   "
+   ]
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 2",
+   "language": "python",
+   "name": "python2"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 2
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython2",
+   "version": "2.7.15+"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 2
+}
